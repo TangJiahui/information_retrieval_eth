@@ -24,7 +24,7 @@ object Crawler {
     val t0 = System.currentTimeMillis;
     
     
-    def hash(s: String) : Long = {
+    def hash64(s: String) : Long = {
       var h = 1125899906842597L; 
       val len = s.length();
 
@@ -35,10 +35,9 @@ object Crawler {
     }
     
 		def MD5(s: String) = {
-			val m = java.security.MessageDigest.getInstance("MD5");
-			val b = s.getBytes("UTF-8");
-			m.update(b, 0, b.length);
-			new java.math.BigInteger(1, m.digest()).toString(16);
+			val digest = MessageDigest.getInstance("MD5");
+			val hash = digest.digest(s.getBytes).map("%02x".format(_)).mkString;
+			hash;
 		}
 
 		def binary(value: Long) : String = {
@@ -71,66 +70,91 @@ object Crawler {
     
 		var crawled = Set[String](); //urls of crawled web-sites
     var crawledFingerprints = Set[String]();
-		var uniqueSites = Set[Long](); //MD5 hashes of crawled web-sites
+		var uniqueSites = Set[String](); //MD5 hashes of crawled web-sites
     
 		var count = 0;
     var page = 0;
 		var duplicatesCount = 0;
-    var nearDupCount = 0;
+    var duplicates = Map[String, Int]();
+    var nearDuplicates = Map[String, Int]();
+    var nearDuplicatesURL = Map[String, String]();
+//    var nearDupCount = 0;
     var studFreq = 0;
+    var engpage = 0;
 
     while (!URLFrontier.isEmpty) {
-//      print("page ")
-//      println(page);
-//      page = page + 1;
+      print("page ")
+      println(page);
+      page = page + 1;
     	var currentFingerprint = "";
 
     	val url = URLFrontier.head;
-    	val doc = Jsoup.connect(url).ignoreHttpErrors(true).get();
+    	val doc = Jsoup.connect(url).timeout(0).ignoreHttpErrors(true).get();
     	val docStr = doc.text().toLowerCase;
-    	val wordFreq = docStr.split("\\W+").toList.groupBy((word: String) => word).mapValues(_.length);
-    	studFreq = studFreq + wordFreq.getOrElse("student", 0);
-    	val title = doc.select("title").text();
+    
+    	val title = doc.select("title");
+      
+      var mainContent = doc.getElementById("mainContent");
+      var textStr = doc.getAllElements().text();
+      
+      if (mainContent == null) {
+        mainContent = doc.getElementById("contentMain");
+      }
+      
+      if (mainContent != null) {
+        textStr = mainContent.getAllElements().text();
+      }
+      
+      val wordFreq = textStr.split("\\W+").toList.groupBy((word: String) => word).mapValues(_.length);
+      studFreq = studFreq + wordFreq.getOrElse("student", 0);
 
+      //language detection
+      
+      
       //check if it is exact duplicate
-			if (!title.contains("<title>404&nbsp;Page not found</title>") && title != "" && !title.contains("404 Not Found") && !title.contains("404")) {
-				val docHash = hash(docStr);
-
+			if (title != "" && !title.contains("404")) {
+				val docHash = MD5(textStr);
+        
 				if (uniqueSites.contains(docHash)) {
-          
+//          println(docHash)
 //          println(url);
 //          println(title);
-//          println("xx")
+//          println("")
 					duplicatesCount = duplicatesCount + 1;
+          duplicates(docHash) = 1 + duplicates.getOrElse(docHash, 1);
 				} else {
 					uniqueSites += docHash;    
           
+					if (url.contains("/en.") || url.contains("/en/")){
+						engpage += 1;
+					}
+
           val html = doc.select("a[href]");
           val title = doc.select("title").text();
 
           //Convert textual data of web-site into binary string
           
-          val textStr = doc.select("#contentMain").text();
           
           val tokens = textStr.split("[ .,;:?!\t\n\r\f]+").toList;
           val shingles = tokens.sliding(3).toSet;
           
-          val shingleHashset = Set[Long]();
+         
           
+          
+          val shingleHashset = Set[Long]();
+         
           for (shingle <- shingles) {
             val shingleStr = shingle.toString;
-            val shingleHash = hash(shingleStr);
+            val shingleHash = hash64(shingleStr);
             shingleHashset += shingleHash;
           }
           
-          
-          
-          val binaryStr = shingleHashset.map(h => binary(h));
+          val hashBinaries = shingleHashset.map(h => binary(h));
           
           //Convert binary string to simHash
           val weights = Array.fill(64)(0);
           
-          for (i <- binaryStr) {
+          for (i <- hashBinaries) {
         	  for (j <- 0 to 63) {
         		  if (i.charAt(j) == '1') {
         			  weights(j) = weights(j) + 1;
@@ -150,8 +174,10 @@ object Crawler {
 
           //check if it is near duplicate
           
+          
           if (isNearDuplicate(currentFingerprint, crawledFingerprints)) {
-            nearDupCount = nearDupCount + 1;
+//            nearDupCount = nearDupCount + 1;
+            nearDuplicates(currentFingerprint) = 1 + nearDuplicates.getOrElse(currentFingerprint, 1);
 //            println(nearDupCount);
 //            println(url);
 //            println(textStr);
@@ -168,7 +194,7 @@ object Crawler {
             
         	  if (absHrefStr.startsWith("http://idvm-infk-hofmann03.inf.ethz.ch/") && absHrefStr.endsWith(".html")) {
               
-        		  if (!absHrefStr.contains("login"))
+        		  if (!absHrefStr.contains("login") && !absHrefStr.contains("..") && !absHrefStr.contains("#"))
         			  if (!URLFrontier.contains(absHrefStr)) {
         				  if (!crawled.contains(absHrefStr)) {
         					  URLFrontier += absHrefStr;
@@ -180,10 +206,7 @@ object Crawler {
           }
           crawledFingerprints += currentFingerprint;
 				}
-//				if (currentFingerprint != "") {
-//					crawledFingerprints += currentFingerprint;
-//
-//				}
+        
 			}
 			crawled += URLFrontier.remove(0);
 //      println(currentFingerprint);
@@ -192,25 +215,36 @@ object Crawler {
 
 
     }
+    
+    val dupCount = duplicates.foldLeft(0)(_+_._2)
+    val nearDupCount = nearDuplicates.foldLeft(0)(_+_._2)
 
+//    println(duplicates);
+//    println(nearDuplicates);
+//    println(nearDuplicatesURL);
 		println(s"Distinct URLs found:  $count");
-		println(s"Exact duplicates found: $duplicatesCount");
+		println(s"Exact duplicates found: $dupCount");
+    println(s"Unique English pages founded: $engpage");
     println(s"""Term frequency of "student": $studFreq""");
-    println(s"Near duplicates found: $nearDupCount")
+    println(s"Near duplicates found: $nearDupCount");
     val t1 = System.currentTimeMillis;
     val elapsedTime = (t1 - t0) / 60000.0;
     
     println(s"Time used: $elapsedTime minutes");
   }
 //   def main(args: Array[String]) {
-//     val doc = Jsoup.connect("http://idvm-infk-hofmann03.inf.ethz.ch/eth/www.ethz.ch/loginc5d9.html?resource=%2Fcontent%2Fmain%2Fen%2Fcampus%2Fbibliotheken-sammlungen-archive%2Fsammlungen-und-archive%2Fhaustier-anatomische-sammlung.html").ignoreHttpErrors(true).get();
-//     val text = doc.select("#contentMain")
-//     val title = doc.select("title").text();
-//     println(title);
-//     if (title == "Shibboleth Authentication Request") {
+//
+//	   
+//	   val doc = Jsoup.connect("http://idvm-infk-hofmann03.inf.ethz.ch/eth/www.ethz.ch/loginc5d9.html?resource=%2Fcontent%2Fmain%2Fen%2Fcampus%2Fbibliotheken-sammlungen-archive%2Fsammlungen-und-archive%2Fhaustier-anatomische-sammlung.html").ignoreHttpErrors(true).get();
+//	   val text = doc.select("#contentMain")
+//			   val title = doc.select("title").text();
+//	   println(title);
+//	   if (title == "Shibboleth Authentication Request") {
 //       println("wooo");
 //     }
 //     val textStr = text.text();
+//     val digest = MessageDigest.getInstance("MD5")
+//     val hash = digest.digest(textStr.getBytes).map("%02x".format(_)).mkString;
 //     if (textStr == "") {
 //       println("yes");
 //     }
